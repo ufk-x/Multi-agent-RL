@@ -20,7 +20,7 @@ class Render:
         self.target = target
         self.forbidden = forbidden
         self.size = size
-        self.fig = plt.figure(figsize=(10, 10), dpi=self.size * 20)
+        self.fig = plt.figure(figsize=(14, 14), dpi=self.size * 20)
         self.ax = plt.gca()
         self.ax.xaxis.set_ticks_position('top')
         self.ax.invert_yaxis()

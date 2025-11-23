@@ -8,7 +8,10 @@ from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter
 
 # 引用上级目录
 import sys
-sys.path.append("..")
+# sys.path.append("..")
+import os 
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 import grid_env
 
 
@@ -28,11 +31,11 @@ class class_value_iteration():
         self.policy = self.mean_policy.copy()
         self.writer = SummaryWriter("../logs")  # 实例化SummaryWriter对象
 
-        print("action_space_size: {} state_space_size：{}" .format(self.action_space_size ,self.state_space_size) )
-        print("state_value.shape:{} , qvalue.shape:{} , mean_policy.shape:{}".format(self.state_value.shape,self.qvalue.shape, self.mean_policy.shape))
-        print("\n分别是non-forbidden area, target area, forbidden area 以及撞墙:")
-        print("self.reward_space_size:{},self.reward_list:{}".format(self.reward_space_size,self.reward_list))
-        print('----------------------------------------------------------------')
+        # print("action_space_size: {} state_space_size：{}" .format(self.action_space_size ,self.state_space_size) )
+        # print("state_value.shape:{} , qvalue.shape:{} , mean_policy.shape:{}".format(self.state_value.shape,self.qvalue.shape, self.mean_policy.shape))
+        # print("\n分别是non-forbidden area, target area, forbidden area 以及撞墙:")
+        # print("self.reward_space_size:{},self.reward_list:{}".format(self.reward_space_size,self.reward_list))
+        # print('----------------------------------------------------------------')
 
     def value_iteration_new(self, tolerance=0.001, steps=100):
         """
@@ -43,9 +46,12 @@ class class_value_iteration():
         """
         # 初始化 V0 为 1
         state_value_k = np.ones(self.state_space_size)
+        iteration_count = 0
         while np.linalg.norm(state_value_k - self.state_value, ord=1)>tolerance and steps>0:
             steps -= 1
+            iteration_count += 1
             self.state_value = state_value_k.copy()
+            # print(f"\n========== 第 {iteration_count} 次迭代 ==========")
             """
                   是普通 policy_improvement 的变种 相当于是值迭代算法 也可以 供策略迭代使用 做策略迭代时不需要 接收第二个返回值
                   更新 qvalue ；qvalue[state,action]=reward+value[next_state]
@@ -74,20 +80,74 @@ class class_value_iteration():
                     qvalue = 0
                     for i in range(self.reward_space_size):
                         # print("self.reward_list[i] * self.env.Rsa[state, action, i]:{}x{}={}".format(self.reward_list[i], self.env.Rsa[state, action, i],self.reward_list[i] * self.env.Rsa[state, action, i]))
-                        qvalue += self.reward_list[i] * self.env.Rsa[state, action, i]
+                        qvalue += self.reward_list[i] * self.env.Rsa[state, action, i] # 即时奖励部分
 
                     for next_state in range(self.state_space_size):
-                        qvalue += self.gama * self.env.Psa[state, action, next_state] * state_value_k[next_state]
+                        qvalue += self.gama * self.env.Psa[state, action, next_state] * state_value_k[next_state] # 折扣后续奖励部分
                     qvalue_list.append(qvalue)
                 # print("qvalue_list:",qvalue_list)
                 q_table[state,:] = qvalue_list.copy()
 
                 state_value_k[state] = max(qvalue_list)  #取该state 的最大state value
                 action_star = qvalue_list.index(max(qvalue_list))  #取该state 的最大state value对应的action
-                policy[state, action_star] = 1  #更新策略，贪婪算法
-            print("q_table:{}".format(q_table))
+                policy[state, action_star] = 1  #更新策略,贪婪算法
+            
+            # 打印当前迭代的Q表和策略
+            # print("Q-table:")
+            # print(q_table)
+            # print("\n当前策略 (每行代表一个state,列代表action,1表示选择该action):")
+            # print(policy)
+            # print(f"状态价值范数变化: {np.linalg.norm(state_value_k - self.state_value, ord=1):.6f}")
+            
             self.policy = policy
+            
+            # 实时显示策略可视化
+            self._visualize_iteration(state_value_k, policy, iteration_count)
+
         return steps
+    
+    def _visualize_iteration(self, state_value, policy, iteration_num):
+        """
+        实时可视化当前迭代的策略和状态价值
+        :param state_value: 当前状态价值
+        :param policy: 当前策略
+        :param iteration_num: 迭代次数
+        """
+        # 清除之前的绘图内容但保留网格结构
+        self.env.render_.ax.patches.clear()
+        self.env.render_.ax.texts.clear()
+        
+        # 重新绘制基础网格
+        for pos in self.env.render_.forbidden:
+            self.env.render_.fill_block(pos=pos)
+        self.env.render_.fill_block(pos=self.env.render_.target, color='darkturquoise')
+        
+        # 重新绘制网格标号
+        for y in range(self.env.size):
+            self.env.render_.write_word(pos=(-0.6, y), word=str(y + 1), size_discount=1.2)
+            self.env.render_.write_word(pos=(y, -0.6), word=str(y + 1), size_discount=1.2)
+        
+        # 绘制策略箭头
+        for state in range(self.state_space_size):
+            for action in range(self.action_space_size):
+                policy_prob = policy[state, action]
+                self.env.render_.draw_action(pos=self.env.state2pos(state),
+                                            toward=policy_prob * 0.4 * self.env.action_to_direction[action],
+                                            radius=policy_prob * 0.1)
+        
+        # 绘制状态价值
+        for state in range(self.state_space_size):
+            self.env.render_.write_word(pos=self.env.state2pos(state), 
+                                       word=str(round(state_value[state], 1)),
+                                       y_offset=0.25,
+                                       size_discount=1.0)
+        
+        # 更新标题显示迭代次数
+        self.env.render_.ax.set_title(f'Iteration: {iteration_num}', fontsize=24, pad=20)
+        
+        # 刷新显示
+        plt.pause(0.1)  # 暂停0.5秒让图像可见
+        plt.draw()
 
 
     def show_policy(self):
@@ -97,6 +157,7 @@ class class_value_iteration():
                 self.env.render_.draw_action(pos=self.env.state2pos(state),
                                              toward=policy * 0.4 * self.env.action_to_direction[action],
                                              radius=policy * 0.1)
+        
 
     def show_state_value(self, state_value, y_offset=0.2):
         for state in range(self.state_space_size):
@@ -132,12 +193,15 @@ class class_value_iteration():
 
 
 if __name__ == "__main__":
-    print("-----Begin!-----")
+    # print("-----Begin!-----")
     gird_world2x2 = grid_env.GridEnv(size=3, target=[2, 2],
                            forbidden=[[1, 0],[2,1]],
-                           render_mode='')
+                           render_mode='human')  # 改为human模式以显示图像
 
     solver = class_value_iteration(gird_world2x2)
+    
+    # 设置matplotlib为交互模式
+    plt.ion()
     start_time = time.time()
 
     # 执行值迭代算法
@@ -151,11 +215,9 @@ if __name__ == "__main__":
     end_time = time.time()
 
     cost_time = end_time - start_time
-    print("cost_time:{}".format(round(cost_time, 2)))
-    print(len(gird_world2x2.render_.trajectory))
+    print("\nIteration completed! Time cost: {} seconds".format(round(cost_time, 2)))
+    # print(len(gird_world2x2.render_.trajectory))
 
-    solver.show_policy()  # solver.env.render()
-    solver.show_state_value(solver.state_value, y_offset=0.25)
-
-
-    gird_world2x2.render()
+    # 关闭交互模式，显示最终结果
+    plt.ioff()
+    plt.show()
