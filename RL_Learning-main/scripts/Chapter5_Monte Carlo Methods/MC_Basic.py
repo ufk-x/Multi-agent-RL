@@ -82,6 +82,7 @@ class MC_Basic:
     """
     jkrose作者这个代码不是MC_basic代码，而是MC_exploring_start every visit形式的代码。
     MC_Basic算法请查看mc_basic_simple() 函数
+    对于每一个s，a对，采集一个episode，然后计算该episode的return，就是当前s，a对的qvalue，再进行policy improvement
     """
     def mc_basic(self, length=50, epochs=10):
         """
@@ -95,12 +96,13 @@ class MC_Basic:
                     g = 0
                     print("obtain_episode,type:,{}; {}".format(type(episode[0]), episode))
                     # 这里原作者利用递归的思想求qvalue,实际上可以傻瓜式求解。
-                    for step in range(len(episode)-1, -1, -1):
+                    for step in range(len(episode)-1, -1, -1): # 从后往前遍历 episode
                         g = episode[step]['reward'] + self.gama * g
                     self.qvalue[state][action] = g
 
                 qvalue_star = self.qvalue[state].max()
                 action_star = self.qvalue[state].tolist().index(qvalue_star)
+                # Policy improvement就是先将所有动作概率置0，然后将最大动作概率置1
                 self.policy[state] = np.zeros(shape=self.action_space_size)
                 self.policy[state, action_star] = 1
                 self.state_value[state] = qvalue_star.copy()
@@ -187,7 +189,7 @@ if __name__ == "__main__":
     for i in episode_length:
         gird_world = grid_env.GridEnv(size=5, target=[2, 3],
                                       forbidden=[[1, 1], [2, 1], [2, 2], [1, 3], [3, 3], [1, 4]],
-                                      render_mode='')
+                                      render_mode='human')
         solver = MC_Basic(gird_world)
         start_time = time.time()
 
@@ -205,6 +207,10 @@ if __name__ == "__main__":
         gird_world.render()
         # gird_world.render_clear()
         print("--------------------")
+        
+        # 保持窗口打开，等待用户关闭
+        import matplotlib.pyplot as plt
+        plt.show()
 
 
 
