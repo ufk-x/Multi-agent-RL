@@ -5,7 +5,9 @@ from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter
 
 # 引用上级目录
 import sys
-sys.path.append("..")
+# sys.path.append("..")
+import os
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import grid_env
 
 from tqdm import tqdm

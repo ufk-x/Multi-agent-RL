@@ -8,7 +8,9 @@ from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter
 
 # 引用上级目录
 import sys
-sys.path.append("..")
+# sys.path.append("..")
+import os
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import grid_env
 
 class  class_policy_iteration:
@@ -28,13 +30,13 @@ class  class_policy_iteration:
         self.policy = self.mean_policy.copy()
         self.writer = SummaryWriter("./logs")  # 实例化SummaryWriter对象
 
-        print("action_space_size: {} state_space_size：{}".format(self.action_space_size, self.state_space_size))
-        print("state_value.shape:{} , qvalue.shape:{} , mean_p olicy.shape:{}".format(self.state_value.shape,
-                                                                                     self.qvalue.shape,
-                                                                                     self.mean_policy.shape))
-        print("\n分别是non-forbidden area, target area, forbidden area 以及撞墙:")
-        print("self.reward_space_size:{},self.reward_list:{}".format(self.reward_space_size, self.reward_list))
-        print('----------------------------------------------------------------')
+        # print("action_space_size: {} state_space_size：{}".format(self.action_space_size, self.state_space_size))
+        # print("state_value.shape:{} , qvalue.shape:{} , mean_p olicy.shape:{}".format(self.state_value.shape,
+        #                                                                              self.qvalue.shape,
+        #                                                                              self.mean_policy.shape))
+        # print("\n分别是non-forbidden area, target area, forbidden area 以及撞墙:")
+        # print("self.reward_space_size:{},self.reward_list:{}".format(self.reward_space_size, self.reward_list))
+        # print('----------------------------------------------------------------')
 
     def random_greed_policy(self):
         """
@@ -45,7 +47,7 @@ class  class_policy_iteration:
         for state_index in range(self.state_space_size):
             action = np.random.choice(range(self.action_space_size))  #从数组中随机抽取元素
             policy[state_index, action] = 1  # 选中该动作作为策略，即置1
-        print("random_choice_policy",policy)
+        # print("random_choice_policy",policy)
         return policy
 
     def policy_iteration(self,tolerance = 0.001,steps=100):
@@ -56,11 +58,16 @@ class  class_policy_iteration:
             :return: 剩余迭代次数
         """
         policy = self.random_greed_policy()
+        iteration_count = 0
         while np.linalg.norm(policy - self.policy, ord=1) > tolerance and steps > 0:
             steps -= 1
+            iteration_count += 1
             policy = self.policy.copy()
-            self.state_value = self.policy_evaluation(self.policy.copy(), tolerance, steps)
+            self.state_value = self.policy_evaluation(self.policy.copy(), tolerance, steps) # 通过n次value iteration 求解policy对应的state value
             self.policy, _ = self.policy_improvement(self.state_value)  #只接收第一个返回值 （更关注第一个返回值
+            
+            # 实时显示策略可视化
+            self._visualize_iteration(self.state_value, self.policy, iteration_count)
         return steps
 
     def policy_evaluation(self, policy, tolerance=0.001, steps=10):
@@ -71,17 +78,16 @@ class  class_policy_iteration:
         :param steps: 当迭代次数大于step时 停止计算 此时若是policy iteration 则算法变为 truncated iteration
         :return: 求解之后的收敛值
         """
-        state_value_k = np.ones(self.state_space_size)
-        state_value = np.zeros(self.state_space_size)
+        state_value_k = np.ones(self.state_space_size) # 相当于上一次的结果
+        state_value = np.zeros(self.state_space_size) # 本次计算的结果
         while np.linalg.norm(state_value_k - state_value, ord=1) > tolerance:  # While j < jtruncate, do
             state_value = state_value_k.copy()
             for state in range(self.state_space_size):
-                value = 0
+                value = 0 # state value = sum(policy * qvalue)
                 for action in range(self.action_space_size):
-                    value += policy[state, action] * self.calculate_qvalue(state_value=state_value_k.copy(),
-                                                                           state=state,
-                                                                           action=action)  # bootstrapping
-                state_value_k[state] = value
+                    value += policy[state, action] * self.calculate_qvalue(state_value=state_value_k.copy(),state=state,action=action)  # bootstrapping
+                state_value_k[state] = value # 更新state value
+        # 迭代收敛后，结束循环，输出
         return state_value_k
 
     def calculate_qvalue(self, state, action, state_value):
@@ -111,7 +117,7 @@ class  class_policy_iteration:
         policy = np.zeros(shape=(self.state_space_size, self.action_space_size))
         state_value_k = state_value.copy()
         for state in range(self.state_space_size):
-            qvalue_list = []
+            qvalue_list = [] # 当前state下所有action对应的qvalue列表
             for action in range(self.action_space_size):
                 qvalue_list.append(self.calculate_qvalue(state, action, state_value.copy()))
             state_value_k[state] = max(qvalue_list)
@@ -119,7 +125,48 @@ class  class_policy_iteration:
             policy[state, action_star] = 1
         return policy, state_value_k
 
-
+    def _visualize_iteration(self, state_value, policy, iteration_num):
+        """
+        实时可视化当前迭代的策略和状态价值
+        :param state_value: 当前状态价值
+        :param policy: 当前策略
+        :param iteration_num: 迭代次数
+        """
+        # 清除之前的绘图内容但保留网格结构
+        self.env.render_.ax.patches.clear()
+        self.env.render_.ax.texts.clear()
+        
+        # 重新绘制基础网格
+        for pos in self.env.render_.forbidden:
+            self.env.render_.fill_block(pos=pos)
+        self.env.render_.fill_block(pos=self.env.render_.target, color='darkturquoise')
+        
+        # 重新绘制网格标号
+        for y in range(self.env.size):
+            self.env.render_.write_word(pos=(-0.6, y), word=str(y + 1), size_discount=1.2)
+            self.env.render_.write_word(pos=(y, -0.6), word=str(y + 1), size_discount=1.2)
+        
+        # 绘制策略箭头
+        for state in range(self.state_space_size):
+            for action in range(self.action_space_size):
+                policy_prob = policy[state, action]
+                self.env.render_.draw_action(pos=self.env.state2pos(state),
+                                            toward=policy_prob * 0.4 * self.env.action_to_direction[action],
+                                            radius=policy_prob * 0.1)
+        
+        # 绘制状态价值
+        for state in range(self.state_space_size):
+            self.env.render_.write_word(pos=self.env.state2pos(state), 
+                                       word=str(round(state_value[state], 1)),
+                                       y_offset=0.25,
+                                       size_discount=1.0)
+        
+        # 更新标题显示迭代次数
+        self.env.render_.ax.set_title(f'Policy Iteration: {iteration_num}', fontsize=24, pad=20)
+        
+        # 刷新显示
+        plt.pause(0.1)
+        plt.draw()
 
     def show_policy(self):
         for state in range(self.state_space_size):
@@ -163,15 +210,19 @@ class  class_policy_iteration:
 
 
 if __name__ == "__main__":
-    print("-----Begin!-----")
+    # print("-----Begin!-----")
     gird_world2x2 = grid_env.GridEnv(size=3, target=[2, 2],
                            forbidden=[[1, 0],[2,1]],
-                           render_mode='')
+                           render_mode='human')
     solver = class_policy_iteration(gird_world2x2)
+    
+    # 设置matplotlib为交互模式
+    plt.ion()
     start_time = time.time()
 
     demand_step = 10000
-    remaining_steps = demand_step - solver.policy_iteration(tolerance=0.001, steps=demand_step)
+    remaining_steps = demand_step - solver.policy_iteration(tolerance=0.001, steps=demand_step)            
+
     if remaining_steps > 0:
         print("Policy iteration converged in {} steps.".format(demand_step - remaining_steps))
     else:
@@ -180,10 +231,9 @@ if __name__ == "__main__":
     end_time = time.time()
 
     cost_time = end_time - start_time
-    print("cost_time:{}".format(round(cost_time, 2)))
-    print(len(gird_world2x2.render_.trajectory))
+    print("\nIteration completed! Time cost: {} seconds".format(round(cost_time, 2)))
+    # print(len(gird_world2x2.render_.trajectory))
 
-    solver.show_policy()  # solver.env.render()
-    solver.show_state_value(solver.state_value, y_offset=0.25)
-
-    gird_world2x2.render()
+    # 关闭交互模式，显示最终结果
+    plt.ioff()
+    plt.show()

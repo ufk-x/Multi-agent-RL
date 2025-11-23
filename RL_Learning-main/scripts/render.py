@@ -201,6 +201,13 @@ class Render:
             next_location = self.trajectory[i][2]
             self.draw_random_line(pos1=location, pos2=next_location)
 
+    def plot_title(self, title):
+        """
+        设置图表标题
+        :param title: 标题文本
+        """
+        self.ax.set_title(title, fontsize=24, pad=20)
+
     def add_subplot_to_fig(self, fig, x, y, subplot_position, xlabel, ylabel, title=''):
         """
         在给定的位置上添加一个子图到当前的图中，并在子图中调用plot函数，设置x,y label和title。
