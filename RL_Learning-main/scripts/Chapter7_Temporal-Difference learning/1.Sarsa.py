@@ -130,11 +130,23 @@ class Sarsa():
         
         # 开始训练循环，共1000个episodes
         for episode_num in range(1000):
+            # epsilon衰减：从高探索率逐渐减少到低探索率
+            # 前期多探索，后期多利用
+            current_epsilon = epsilon * (1 - episode_num / 1000)  # 线性衰减到0
+            current_epsilon = max(0.01, current_epsilon)  # 保持最小1%的探索
+            
             self.env.reset()  # 重置环境
+            # 重要：将智能体放回初始位置
+            self.env.agent_location = initial_location
+            
             total_reward = 0  # 当前episode的累计奖励
             episode_length = 0  # 当前episode的步数
             done = False  # 是否到达终止状态（目标）
-            print("episode_num:",episode_num)
+            max_steps = 200  # 减少最大步数，强制智能体学习更短路径
+            
+            # 每100个episode打印一次进度
+            if episode_num % 100 == 0:
+                print(f"episode_num: {episode_num}, epsilon: {current_epsilon:.3f}")
 
             # 初始化：在起始状态s0根据策略π选择初始动作a0
             state = initial_state
@@ -146,8 +158,8 @@ class Sarsa():
             aciton = [action]
             rewards = [0]
             
-            # Episode主循环：持续执行直到到达目标状态
-            while not done:
+            # Episode主循环：持续执行直到到达目标状态或达到最大步数
+            while not done and episode_length < max_steps:
                 episode_length += 1
                 
                 # 执行动作a，观察即时奖励r和是否终止
@@ -176,17 +188,20 @@ class Sarsa():
                 qvalue_star = self.qvalue[state].max()
                 action_star = self.qvalue[state].tolist().index(qvalue_star)
                 
-                # ε-greedy策略更新：
+                # ε-greedy策略更新：使用当前epsilon
                 # - 最优动作a*的概率：1-ε+ε/|A| （大部分概率+一小部分随机概率）
                 # - 其他动作的概率：ε/|A| （只有随机探索的概率）
                 for a in range(self.action_space_size):
                     if a == action_star:
                         # 贪婪动作：获得(1-ε)的基础概率 + ε/|A|的随机探索概率
-                        self.policy[state, a] = 1 - epsilon + (epsilon / self.action_space_size)
+                        self.policy[state, a] = 1 - current_epsilon + (current_epsilon / self.action_space_size)
                     else:
                         # 非贪婪动作：只有ε/|A|的随机探索概率
-                        self.policy[state, a] = epsilon / self.action_space_size
+                        self.policy[state, a] = current_epsilon / self.action_space_size
 
+                # 更新状态价值：V(s) = max_a Q(s,a)
+                self.state_value[state] = qvalue_star
+                
                 # 转移到下一个状态-动作对 (s,a) ← (s',a')
                 action = next_action
                 state = next_state
@@ -201,7 +216,8 @@ if __name__ =="__main__":
     gird_world = grid_env.GridEnv(size=5, target=[2, 3],
                                   forbidden=[[1, 1], [2, 1], [2, 2], [1, 3], [3, 3], [1, 4]],
                                   render_mode='')
-    solver = Sarsa(alpha =0.1, env = gird_world)
+    # 降低学习率以提高稳定性
+    solver = Sarsa(alpha =0.05, env = gird_world)
     # solver.sarsa()
     # print("env.policy[0, :]:",solver.policy[0, :])
     # for _ in range(20):
@@ -212,7 +228,8 @@ if __name__ =="__main__":
     start_time = time.time()
 
     initial_location = [0,0]
-    total_rewards, episode_lengths = solver.Sarsa_alg(initial_location = initial_location)
+    # 使用更高的探索率，帮助智能体探索到目标
+    total_rewards, episode_lengths = solver.Sarsa_alg(initial_location = initial_location, epsilon=0.3)
 
 
     end_time = time.time()
@@ -220,8 +237,17 @@ if __name__ =="__main__":
     print("cost_time:",cost_time)
     print(len(gird_world.render_.trajectory))
 
+    # 打印训练统计信息
+    print("\n=== 训练统计 ===")
+    print(f"平均episode长度: {np.mean(episode_lengths):.2f}")
+    print(f"平均总奖励: {np.mean(total_rewards):.2f}")
+    print(f"最后100个episodes平均长度: {np.mean(episode_lengths[-100:]):.2f}")
+    print(f"最后100个episodes平均奖励: {np.mean(total_rewards[-100:]):.2f}")
+    
     initial_state = solver.env.pos2state(initial_location)
-    print("训练后的policy结果为:\n",solver.policy[initial_state,:])
+    print("\n训练后的policy结果为:\n",solver.policy[initial_state,:])
+    print(f"初始状态的Q值: {solver.qvalue[initial_state,:]}")
+    print(f"初始状态的状态价值: {solver.state_value[initial_state]}")
     solver.show_policy()  # solver.env.render()
     solver.show_state_value(solver.state_value, y_offset=0.25)
     # gird_world.plot_title("Episode_length = " + str(i))
