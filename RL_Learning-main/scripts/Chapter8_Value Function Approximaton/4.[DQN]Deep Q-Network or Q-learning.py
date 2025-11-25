@@ -8,7 +8,9 @@ from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter
 
 # 引用上级目录
 import sys
-sys.path.append("..")
+# sys.path.append("..")
+import os
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import grid_env
 
 from model import *
@@ -158,7 +160,7 @@ class DQN():
         return data.DataLoader(dataset, batch_size, shuffle=is_train, drop_last=False)
 
 
-    def dqn(self, learning_rate=0.0015, episode_length=5000, epochs=600, batch_size=100, update_step=10):
+    def dqn(self, learning_rate=0.0015, episode_length=5000, epochs=100, batch_size=100, update_step=10):
         policy = self.policy.copy()
         state_value = self.state_value.copy()
         # Initialization: A main network and a target network with the same initial parameter.
@@ -222,7 +224,8 @@ class DQN():
         ax_loss.set_title('loss')
         ax_loss.set_xlabel('Epoch')
         ax_loss.set_ylabel('Loss')
-        plt.show()
+        # 不在这里显示，返回图形对象供后续使用
+        return fig_rmse
 
 
 
@@ -234,7 +237,7 @@ if __name__ == '__main__':
     # print(dqn(input))
     gird_world = grid_env.GridEnv(size=5, target=[2, 3],
                                   forbidden=[[1, 1], [2, 1], [2, 2], [1, 3], [3, 3], [1, 4]],
-                                  render_mode='')
+                                  render_mode='')  # 使用空字符串而不是'video'以避免渲染问题
     solver = DQN(alpha=0.1, env=gird_world)
     # solver.sarsa()
     # print("env.policy[0, :]:",solver.policy[0, :])
@@ -245,13 +248,18 @@ if __name__ == '__main__':
 
     start_time = time.time()
 
-    solver.dqn()
+    fig_loss = solver.dqn()
     print("solver.state_value:", solver.state_value)
 
     end_time = time.time()
     cost_time = end_time - start_time
     print("cost_time:", cost_time)
 
-    solver.show_policy()  # solver.env.render()
+    # 先绘制并显示网格世界（带策略和状态值）
+    solver.show_policy()
     solver.show_state_value(solver.state_value, y_offset=0.25)
     solver.env.render()
+    
+    # 最后显示loss和RMSE图表
+    if fig_loss is not None:
+        plt.show()

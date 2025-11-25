@@ -1,5 +1,6 @@
 from typing import Union
 
+import matplotlib
 import matplotlib.animation as animation
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
@@ -14,7 +15,10 @@ class Render:
         :param target:目标点的位置
         :param forbidden:障碍物区域位置
         :param size:网格世界的size 默认为 5x5
-        """
+        # """
+        # # 使用非交互式后端以避免显示问题
+        # matplotlib.use('Agg')
+        
         # 初始化
         self.agent = None
         self.target = target
@@ -150,7 +154,8 @@ class Render:
         :param t: 持续时间
         :return: None
         """
-        self.fig.show()
+        plt.figure(self.fig.number)
+        plt.show()
 
     def save_frame(self, name: str) -> None:
         """
@@ -166,6 +171,12 @@ class Render:
         :param name:视频文件的名字
         :return:None
         """
+        import os
+        # 确保目录存在
+        video_dir = os.path.dirname(name)
+        if video_dir and not os.path.exists(video_dir):
+            os.makedirs(video_dir, exist_ok=True)
+        
         anim = animation.FuncAnimation(self.fig, self.animate, init_func=self.init(), frames=len(self.trajectory),
                                        interval=25, repeat=False)
         anim.save(name + '.mp4')

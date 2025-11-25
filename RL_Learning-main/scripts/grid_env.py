@@ -108,8 +108,9 @@ class GridEnv(gym.Env):
     def render(self) -> Optional[Union[RenderFrame, List[RenderFrame]]]:
         if self.render_mode == "video":
             self.render_.save_video('image/' + str(time.time()))
-
-        self.render_.show_frame(0.3)
+        else:
+            # 只在非视频模式下显示图形
+            self.render_.show_frame(0.3)
         return None
     def render_clear(self):
         self.render_.close_frame()
