@@ -1,6 +1,8 @@
 import random
 import time
 import numpy as np
+import matplotlib
+matplotlib.use('TkAgg')  # 使用TkAgg后端以支持图形显示
 import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter
 
@@ -84,7 +86,7 @@ class TD_learning_with_FunctionApproximation():
                                               toward=policy * 0.4 * self.env.action_to_direction[action],
                                               radius=policy * 0.1)
 
-    def show_state_value(self, state_value, y_offset=0.2):
+    def show_state_value(self, state_value, y_offset=0.2, color='black'):
          """
          在网格世界中显示状态值。
          在每个状态位置显示其值函数的数值。
@@ -94,7 +96,7 @@ class TD_learning_with_FunctionApproximation():
          for state in range(self.state_space_size):
              self.env.render_.write_word(pos=self.env.state2pos(state), word=str(round(state_value[state], 1)),
                                          y_offset=y_offset,
-                                         size_discount=0.7)
+                                         size_discount=0.7, color=color)
     def obtain_episode(self, policy, start_state, start_action, length):
         """
         根据给定的策略生成一个episode（轨迹）。
@@ -197,7 +199,7 @@ class TD_learning_with_FunctionApproximation():
         return np.array(feature_vector)
 
 
-    def state_iteration(self, policy, tolerance=0.001, steps=10):
+    def state_iteration(self, policy, tolerance=0.0001, max_iterations=10000):
         """
         策略评估：计算给定策略下的状态值函数。
         使用迭代方法求解贝尔曼方程：V^π(s) = Σ_a π(a|s) Σ_{s',r} p(s',r|s,a) [r + γ V^π(s')]
@@ -208,17 +210,28 @@ class TD_learning_with_FunctionApproximation():
         :return: 收敛后的状态值数组
         """
         # 初始化状态值
-        state_value_k = np.ones(self.state_space_size)
         state_value = np.zeros(self.state_space_size)
-        while np.linalg.norm(state_value_k - state_value, ord=1) > tolerance:
-            state_value = state_value_k.copy()
+        iteration_count = 0
+        while True:
+            # 保存旧的状态值用于检查收敛
+            state_value_old = state_value.copy()
+            # 对每个状态进行策略评估更新
             for state in range(self.state_space_size):
                 value = 0
                 for action in range(self.action_space_size):
-                    # 计算Q值并加权求和
-                    value += policy[state, action] * self.calculate_qvalue(state_value=state_value_k.copy(), state=state, action=action)  # bootstrapping
-                state_value_k[state] = value
-        return state_value_k
+                    # 计算Q值并加权求和，使用旧的state_value（同步更新）
+                    value += policy[state, action] * self.calculate_qvalue(state=state, action=action, state_value=state_value_old)
+                state_value[state] = value
+            
+            # 检查是否收敛
+            iteration_count += 1
+            if np.linalg.norm(state_value - state_value_old, ord=1) < tolerance:
+                print(f"State iteration converged after {iteration_count} iterations")
+                break
+            if iteration_count >= max_iterations:
+                print(f"State iteration stopped after {max_iterations} iterations")
+                break
+        return state_value
     
     def calculate_qvalue(self, state, action, state_value):
         """
@@ -231,7 +244,7 @@ class TD_learning_with_FunctionApproximation():
         qvalue = 0
         # 奖励期望
         for i in range(self.reward_space_size):
-            qvalue += self.reward_list[i] * self.env.Rsa[state, action, i]
+            qvalue += self.env.reward_list[i] * self.env.Rsa[state, action, i]
         # 折扣未来值期望
         for next_state in range(self.state_space_size):
             qvalue += self.gamma * self.env.Psa[state, action, next_state] * state_value[next_state]
@@ -279,38 +292,40 @@ class TD_learning_with_FunctionApproximation():
                 next_state = sample['next_state']
                 # TD更新公式：w += α [r + γ φ(s')^T w - φ(s)^T w] φ(s)
                 # 这是半梯度TD(0)方法
-                w += (self.learning_rate*
-                      (reward
-                    + self.gamma*np.dot(self.get_feature_vector(fourier, next_state, ord),w)
-                    - np.dot(self.get_feature_vector(fourier, state, ord),w) ))
+                w += self.learning_rate*(reward+ self.gamma*np.dot(self.get_feature_vector(fourier, next_state, ord),w)- np.dot(self.get_feature_vector(fourier, state, ord),w) )*self.get_feature_vector(fourier, state, ord)
 
             # 计算当前近似值
             for state in range(self.state_space_size):
                 value_hat[state] = np.dot(self.get_feature_vector(fourier, state, ord), w)
             # 计算与真实值的RMSE
             rmse.append(np.sqrt(np.mean((value_hat - self.state_value) ** 2)))
-            print(epoch)
+            if epoch % 100 == 0:
+                print(epoch)
 
         # 可视化结果
         X, Y = np.meshgrid(np.arange(1, 6), np.arange(1, 6))  # position on grid world.
         Z = self.state_value.reshape(5, 5)
         Z1 = value_hat.reshape(5, 5)
+        
         # 绘制 3D 曲面图
-        fig = plt.figure(figsize=(8, 6))  # 设置图形的尺寸，宽度为8，高度为6
+        fig = plt.figure(figsize=(14, 6))  # 设置图形的尺寸，宽度为14以容纳两个子图
+        
+        # 左图：真实状态值
         ax = fig.add_subplot(121, projection='3d')
-
-        ax.plot_surface(X, Y, Z)
+        ax.plot_surface(X, Y, Z, cmap='viridis')
         ax.set_title('True State Value')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
         ax.set_zlabel('State Value')
-        z_min,z_max = -5,-2
-        ax.set_zlim(z_min, z_max)
+        
+        # 右图：估计状态值
         ax1 = fig.add_subplot(122, projection='3d')
-        ax1.plot_surface(X, Y, Z1)
+        ax1.plot_surface(X, Y, Z1, cmap='plasma')
         ax1.set_title('Estimated State Value')
         ax1.set_xlabel('X')
-        ax1.set_zlim(z_min, z_max)
+        ax1.set_ylabel('Y')
+        ax1.set_zlabel('State Value')
+        # 不设置固定的z轴范围，让matplotlib自动调整以显示所有数据
         fig_rmse = plt.figure(figsize=(8, 6))  # 设置图形的尺寸，宽度为8，高度为6
         ax_rmse = fig_rmse.add_subplot(111)
 
@@ -319,7 +334,7 @@ class TD_learning_with_FunctionApproximation():
         ax_rmse.set_title('RMSE')
         ax_rmse.set_xlabel('Epoch')
         ax_rmse.set_ylabel('RMSE')
-        plt.show()
+        # 不立即显示，让main函数统一管理显示顺序
         return value_hat
     
 def main():
@@ -330,7 +345,7 @@ def main():
     # 创建5x5网格世界，设置目标位置[2,3]，禁区等
     gird_world = grid_env.GridEnv(size=5, target=[2, 3],
                                   forbidden=[[1, 1], [2, 1], [2, 2], [1, 3], [3, 3], [1, 4]],
-                                  render_mode='video')
+                                  render_mode='')
 
     print("Creating solver")
     # 创建TD学习求解器，学习率设为0.0005
@@ -338,15 +353,26 @@ def main():
 
     print("Calculating state value hat")
     # 运行TD学习，默认参数：5000轮，不使用傅里叶，1阶多项式
-    state_value_hat = solver.td_state_value_hat()
-    # 显示近似状态值（偏移-0.25）
-    solver.show_state_value(state_value=state_value_hat, y_offset=-0.25)
-    # 显示真实状态值（偏移-0.25，可能重叠显示）
-    solver.show_state_value(state_value=solver.state_value, y_offset=-0.25)
+    state_value_hat = solver.td_state_value_hat(epochs=500, fourier=True, ord=3)
+    
     print("state_value_hat:", state_value_hat)
     print("solver.state_value:", solver.state_value)
-    # 渲染网格世界
-    gird_world.render()
+    
+    # 在网格上显示策略箭头
+    print("Showing policy arrows")
+    solver.show_policy()
+    
+    # 显示真实状态值（上方，偏移-0.25）
+    print("Showing true state values")
+    solver.show_state_value(state_value=solver.state_value, y_offset=-0.25, color='green')
+    
+    # 显示近似状态值（下方，偏移0.25）
+    print("Showing estimated state values")
+    solver.show_state_value(state_value=state_value_hat, y_offset=0.25)
+    
+    # 显示所有matplotlib图形（包括网格世界、3D图和RMSE图）
+    print("Displaying all figures...")
+    plt.show()
 
 if __name__ == "__main__":
     main()
