@@ -6,7 +6,9 @@ from torch.utils.tensorboard import SummaryWriter  # 导入SummaryWriter用于�
 
 # 引用上级目录
 import sys
-sys.path.append("..")
+# sys.path.append("..")
+import os
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import grid_env
 
 """
@@ -212,7 +214,7 @@ class Sarsa():
         feature_vector = []
 
         # ============ 生成状态特征向量 ============
-        if fourier:
+        if fourier is not True:
             # -------- 傅里叶基函数特征 --------
             # 使用 φ_{i,j}(x,y) = cos(π(i·x_norm + j·y_norm))
             # 优点：对平滑函数近似效果好，频率可调
@@ -222,9 +224,15 @@ class Sarsa():
             y_normalized = y / self.env.size
             
             # 生成所有(i,j)组合的傅里叶基函数，总共(ord+1)²个
-            for i in range(ord + 1):  # i是x方向的频率
-                for j in range(ord + 1):  # j是y方向的频率
-                    feature_vector.append(np.cos(np.pi * (i * x_normalized + j * y_normalized)))
+             # 傅里叶基函数，包含状态和动作
+            action_normalized = action / self.action_space_size
+            for i in range(ord + 1):
+                for j in range(ord + 1):
+                    for k in range(ord + 1):
+                        feature_vector.append(
+                            np.cos(np.pi * (i * x_normalized + j * action_normalized + k * y_normalized)))
+            
+            return np.array(feature_vector)
 
         else:
             # -------- 多项式基函数特征 --------
@@ -256,11 +264,11 @@ class Sarsa():
             action_feature_vector = np.zeros(self.action_space_size)
             action_feature_vector[action] = 1
         
-        # ============ 拼接状态特征和动作特征 ============
-        # 最终特征向量 = [状态特征, 动作特征]
-        # 例如：状态特征6维 + 动作特征5维 = 总共11维特征向量
-        # 这样的设计使得Q(s,a)既依赖于状态，也依赖于动作
-        return np.concatenate((feature_vector, action_feature_vector), axis=0)
+            # ============ 拼接状态特征和动作特征 ============
+            # 最终特征向量 = [状态特征, 动作特征]
+            # 例如：状态特征6维 + 动作特征5维 = 总共11维特征向量
+            # 这样的设计使得Q(s,a)既依赖于状态，也依赖于动作
+            return np.concatenate((feature_vector, action_feature_vector), axis=0)
 
     def epsilon_greedy_policy(self, state: int, w: np.ndarray, ord: int, epsilon: float) -> int:
         """
@@ -336,7 +344,7 @@ class Sarsa():
                 # 非最优动作：只获得ε/|A|的探索概率
                 self.policy[state, a] = epsilon / self.action_space_size
 
-    def Sarsa_alg_with_approximation(self, initial_location, epsilon=0.1, learning_rate=0.001, ord=5):
+    def Sarsa_alg_with_approximation(self, initial_location, epsilon=0.1, ord=3):
         """
         使用函数近似的SARSA算法学习最优策略
         
@@ -381,14 +389,15 @@ class Sarsa():
         # q_hat用于存储近似的Q值（可选，用于调试或可视化）
         q_hat = np.zeros((self.state_space_size, self.action_space_size))
         # ============ 主训练循环：运行多个episode ============
-        for episode_num in range(1000):
+        for episode_num in range(300):
             # -------- Episode初始化 --------
             self.env.reset()  # 重置环境
             self.env.agent_location = initial_location.copy()  # 设置智能体初始位置
             total_reward = 0  # 本episode的累积奖励
             episode_length = 0  # 本episode的步数
             done = False  # 是否到达终止状态
-            print("episode_num:", episode_num)
+            if episode_num % 100 == 0:
+                print("episode_num:", episode_num)
             
             # 从初始状态开始
             state = initial_state
@@ -438,7 +447,7 @@ class Sarsa():
                 # - α是学习率
                 # - δ是TD误差
                 # - φ(s_t, a_t)是特征向量，也是Q对w的梯度：∇_w Q(s,a,w) = φ(s,a)
-                w = w + learning_rate * td_error * feature_vector_sa
+                w = w + self.alpha * td_error * feature_vector_sa
 
                 # ============ (8) 更新策略 ============
                 # 基于新的权重w更新当前状态的策略为ε-greedy
@@ -453,8 +462,28 @@ class Sarsa():
             total_rewards.append(total_reward)
             episode_lengths.append(episode_length)
 
-        # ============ 训练完成，返回结果 ============
-        return total_rewards, episode_lengths
+        # ============ 训练完成，计算状态值 ============
+        # SARSA学习的是Q值，但可以从Q值导出V值用于可视化
+        # V(s) = Σ_a π(a|s) * Q(s,a) 或 V(s) = max_a Q(s,a) （贪婪策略）
+        print("\n计算状态值...")
+        for state in range(self.state_space_size):
+            # 计算该状态下所有动作的Q值
+            q_values = np.zeros(self.action_space_size)
+            for action in range(self.action_space_size):
+                feature_vector_sa = self.get_feature_vector_with_action(False, state, action, ord=ord)
+                q_values[action] = np.dot(feature_vector_sa, w)
+            
+            # 使用当前策略计算状态值：V(s) = Σ_a π(a|s) * Q(s,a)
+            self.state_value[state] = np.dot(self.policy[state, :], q_values)
+            
+            # 也更新qvalue表用于调试
+            self.qvalue[state, :] = q_values
+        
+        print(f"状态值计算完成！")
+        print(f"状态值范围: [{self.state_value.min():.2f}, {self.state_value.max():.2f}]")
+        
+        # ============ 返回结果，包括权重w用于后续使用 ============
+        return total_rewards, episode_lengths, w
 
 
 if __name__ == "__main__":
@@ -466,7 +495,7 @@ if __name__ == "__main__":
     
     # ============ 创建SARSA求解器 ============
     # alpha=0.1是学习率，控制Q值更新的步长
-    solver = Sarsa(alpha=0.1, env=gird_world)
+    solver = Sarsa(alpha=0.01, env=gird_world)
 
     # ============ 运行SARSA算法 ============
     print("\n" + "="*50)
@@ -480,7 +509,7 @@ if __name__ == "__main__":
     
     # 训练：使用函数近似的SARSA算法学习最优策略
     # 默认参数：epsilon=0.1, learning_rate=0.001, ord=5
-    total_rewards, episode_lengths = solver.Sarsa_alg_with_approximation(
+    total_rewards, episode_lengths, learned_w = solver.Sarsa_alg_with_approximation(
         initial_location=initial_location)
 
     end_time = time.time()
@@ -500,13 +529,23 @@ if __name__ == "__main__":
     print(f"最优动作：{np.argmax(solver.policy[initial_state, :])}")
     
     # ============ 可视化结果 ============
+    print("\n可视化学习结果...")
+    print(f"状态值统计信息:")
+    print(f"  最小值: {solver.state_value.min():.2f}")
+    print(f"  最大值: {solver.state_value.max():.2f}")
+    print(f"  平均值: {solver.state_value.mean():.2f}")
+    print(f"  前5个状态的值: {solver.state_value[:5]}")
+    
     # 在网格世界中显示学习到的策略（箭头）
+    print("\n绘制策略箭头...")
     solver.show_policy()
     
-    # 显示状态值（虽然SARSA学习Q值，但可以从Q值导出V值用于可视化）
+    # 显示状态值（从学习到的Q值导出）
+    print("显示状态值...")
     solver.show_state_value(solver.state_value, y_offset=0.25)
     
     # 渲染网格世界
+    print("渲染网格世界...")
     gird_world.render()
     
     # ============ 绘制训练曲线 ============
