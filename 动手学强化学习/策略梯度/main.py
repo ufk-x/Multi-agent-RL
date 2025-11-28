@@ -20,7 +20,7 @@ device = torch.device("cuda") if torch.cuda.is_available() else torch.device(
     "cpu")
 print(f"Using device: {device}")
 
-env_name = "CartPole-v0"
+env_name = "CartPole-v1"
 env = gym.make(env_name)
 env.reset(seed = 0)
 torch.manual_seed(0)
