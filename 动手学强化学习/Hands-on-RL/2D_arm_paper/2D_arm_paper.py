@@ -29,44 +29,47 @@ class Arm2DEnv:
         # 设备配置
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
-        # 机械臂参数（使用torch张量）
-        self.link_lengths = torch.tensor([1.0, 1.0], dtype=torch.float32, device=self.device)
-        self.base_pos = torch.tensor([0.0, 0.0], dtype=torch.float32, device=self.device)
+        # 单位转换参数
+        self.m_to_env_scale = 100.0  # 米到环境单位（厘米）的转换比例
         
-        # 障碍物参数（课程学习：先放在偏离路径的位置）
-        self.obstacle_pos = torch.tensor([1.0, 1.0], dtype=torch.float32, device=self.device)  # 稍微偏离直线路径
-        self.obstacle_radius = 0.10  # 较小尺寸
+        # 机械臂参数（使用torch张量，原始单位为米）
+        self.link_lengths = torch.tensor([1.0, 1.0], dtype=torch.float32, device=self.device) * self.m_to_env_scale
+        self.base_pos = torch.tensor([0.0, 0.0], dtype=torch.float32, device=self.device) * self.m_to_env_scale
         
-        # 任务参数（课程学习：使绕行更容易）
-        self.start_pos = torch.tensor([1.2, 0.4], dtype=torch.float32, device=self.device)  # 起点
-        self.target_pos = torch.tensor([0.6, 1.4], dtype=torch.float32, device=self.device)  # 目标（恢复原始成功配置）
+        # 障碍物参数（原始单位为米）
+        self.obstacle_pos = torch.tensor([1.2, 0.8], dtype=torch.float32, device=self.device) * self.m_to_env_scale
+        self.obstacle_radius = 0.3 * self.m_to_env_scale
+        
+        # 任务参数（原始单位为米）
+        self.start_pos = torch.tensor([1.5, -0.5], dtype=torch.float32, device=self.device) * self.m_to_env_scale
+        self.target_pos = torch.tensor([1.0, 1.5], dtype=torch.float32, device=self.device) * self.m_to_env_scale
         
         # 状态变量
         self.joint_angles = torch.zeros(2, dtype=torch.float32, device=self.device)
         self.joint_velocities = torch.zeros(2, dtype=torch.float32, device=self.device)
         
         # 环境参数
-        self.max_torque = 2.0  # 最大扭矩
+        self.max_torque = 2.0 * self.m_to_env_scale  # 最大扭矩(从Nm转换为环境单位)
         self.dt = 0.05  # 时间步长
-        self.max_steps = 250  # 最大步数（从150增加到250，给予更多时间）
+        self.max_steps = 1000  # 最大步数
         self.current_step = 0
-        self.if_done_when_collision = True  # 碰撞时终止episode（避障优先）
+        self.if_done_when_collision = False  # 碰撞时是否终止episode
         
         # 奖励权重
-        self.reward_target = 5000.0  # 到达目标的奖励（大幅提高，确保是最优策略）
-        self.reward_collision = -200.0  # 碰撞惩罚
+        self.reward_target = 1000.0  # 到达目标的奖励
+        self.reward_collision = 1000.0  # 碰撞惩罚
         self.penalty_distance = -1.0  # 距离惩罚系数
-        self.penalty_action = -0.005  # 动作惩罚系数（从-0.01减少到-0.005）
-        # self.penalty_action = 0.0  # 动作惩罚系数
-        self.closer_reward_rate = 20.0  # 接近目标的奖励系数（从12提升到20）
+        self.penalty_action = 0.01  # 动作惩罚系数
+        self.closer_reward_rate = 12.0  # 接近目标的奖励系数
         self.penalty_static = -0.5  # 静止不动的惩罚系数
-        self.static_threshold = 0.001  # 判定为静止的速度阈值
+        self.static_threshold = 0.001 * self.m_to_env_scale  # 判定为静止的速度阈值（原始单位为m/s，转换为cm/s）
         
-        # 距离参数
-        self.target_threshold = 0.15  # 到达目标的距离阈值（平衡精度和成功率）
-        self.collision_margin = 0.001  # 碰撞检测边界
+        # 距离参数（单位为cm）
+        self.target_threshold = 1e-2 * self.m_to_env_scale  # 到达目标的距离阈值，从米转换到环境单位
+        self.tau_e = 1e-4  # 目标距离稳定阈值
+        self.collision_margin = 1e-3 * self.m_to_env_scale  # 碰撞检测边界，从米转换为环境单位
+        self.collision_punish_distance = 2 * self.collision_margin  # 碰撞惩罚距离，是碰撞边界的两倍
         self.dist_to_target_prev = None  # 上一步到目标的距离
-        self.min_dist_to_target = float('inf')  # 记录到目标的最近距离
         
     def forward_kinematics(self, angles):
         """
@@ -101,47 +104,39 @@ class Arm2DEnv:
         _, joint1_pos, end_pos = self.forward_kinematics(self.joint_angles)
         return self.check_collision_fast(end_pos, joint1_pos)
     
-    def check_collision_fast(self, end_pos, joint1_pos):
+    def check_collision_fast(self, end_pos, joint1_pos=None):
         """
         快速碰撞检测 - 接受预计算的位置，避免重复计算forward_kinematics
         """
+        # 如果没有提供joint1_pos，需要计算
+        if joint1_pos is None:
+            _, joint1_pos, _ = self.forward_kinematics(self.joint_angles)
+        
         # 使用torch计算距离
-        x_pos = self.obstacle_pos
-        seg_starts = torch.stack([self.base_pos, joint1_pos])
-        seg_ends = torch.stack([joint1_pos, end_pos])
-        e12 = seg_ends - seg_starts
-        e1x = x_pos - seg_starts
-        e12_len2 = torch.sum(e12 ** 2, dim=1)
-        t = torch.clamp(torch.sum(e1x * e12, dim=1) / e12_len2, 0.0, 1.0)
-        closest_points = seg_starts + (t.unsqueeze(1) * e12)
-        dists = torch.norm(x_pos - closest_points, dim=1)
-        ret = dists - self.obstacle_radius - self.collision_margin # 正数表示未碰撞，负数表示碰撞
-        return torch.where(ret>0, 0, ret) # shape (2, ), 返回负值表示碰撞的距离
-
-        # dist_end = torch.norm(end_pos - self.obstacle_pos)
-        # if dist_end < self.obstacle_radius + self.collision_margin:
-        #     return True
+        dist_end = torch.norm(end_pos - self.obstacle_pos)
+        if dist_end < self.obstacle_radius + self.collision_margin:
+            return True
         
-        # # 检查中间关节碰撞
-        # dist_joint1 = torch.norm(joint1_pos - self.obstacle_pos)
-        # if dist_joint1 < self.obstacle_radius + self.collision_margin:
-        #     return True
+        # 检查中间关节碰撞
+        dist_joint1 = torch.norm(joint1_pos - self.obstacle_pos)
+        if dist_joint1 < self.obstacle_radius + self.collision_margin:
+            return True
         
-        # # 检查连杆1与障碍物的距离
-        # dist_link1 = self._point_to_segment_distance(
-        #     self.obstacle_pos, self.base_pos, joint1_pos
-        # )
-        # if dist_link1 < self.obstacle_radius + self.collision_margin:
-        #     return True
+        # 检查连杆1与障碍物的距离
+        dist_link1 = self._point_to_segment_distance(
+            self.obstacle_pos, self.base_pos, joint1_pos
+        )
+        if dist_link1 < self.obstacle_radius + self.collision_margin:
+            return True
         
-        # # 检查连杆2与障碍物的距离
-        # dist_link2 = self._point_to_segment_distance(
-        #     self.obstacle_pos, joint1_pos, end_pos
-        # )
-        # if dist_link2 < self.obstacle_radius + self.collision_margin:
-        #     return True
+        # 检查连杆2与障碍物的距离
+        dist_link2 = self._point_to_segment_distance(
+            self.obstacle_pos, joint1_pos, end_pos
+        )
+        if dist_link2 < self.obstacle_radius + self.collision_margin:
+            return True
         
-        # return False
+        return False
     
     def get_min_distance_to_obstacle(self):
         """
@@ -160,6 +155,22 @@ class Arm2DEnv:
         )
         
         return torch.min(torch.stack([dist_end, dist_joint1, dist_link1, dist_link2]))
+    
+    def get_dis_link_to_obstacle_from_positions(self, joint1_pos, end_pos):
+        """
+        计算每一条连杆和关节到障碍物的距离 - 使用预计算的位置
+        """
+        base_pos = self.base_pos
+        # 使用torch计算距离
+        seg_starts = torch.stack([base_pos, joint1_pos])
+        seg_ends = torch.stack([joint1_pos, end_pos])
+        e12 = seg_ends - seg_starts
+        e1x = self.obstacle_pos - seg_starts
+        seg_lens = torch.norm(e12, dim=1)
+        t = torch.clamp(torch.sum(e1x * e12, dim=1) / (seg_lens ** 2), 0, 1)
+        closest_points = seg_starts + (t.unsqueeze(1) * e12)
+        dists = torch.norm(self.obstacle_pos - closest_points, dim=1)
+        return dists  # 返回每条连杆的距离张量
     
     def _point_to_segment_distance(self, point, seg_start, seg_end):
         """计算点到线段的最短距离 - 使用torch加速"""
@@ -180,67 +191,35 @@ class Arm2DEnv:
     
     def get_state(self, return_numpy=True):
         """
-        获取增强状态向量
+        获取状态向量
         状态包括：
         - 关节角度 (2维)
-        - 关节角速度 (2维)
         - 末端位置 (2维)
-        - 目标位置 (2维)
-        - 障碍物位置 (2维)
-        - 末端到目标的距离 (1维) **新增**
-        - 末端到障碍物的最短距离 (1维) **新增**
-        - 中间关节到障碍物的距离 (1维) **新增**
-        总共14维
+        - error向量 [末端到目标距离, 末端到目标的x偏差, 末端到目标的y偏差](3维)
+        - 每个连杆到障碍物的距离 (2维)
+        总共9维
         """
-        base_pos, joint1_pos, end_pos = self.forward_kinematics(self.joint_angles)
+        _, joint1_pos, end_pos = self.forward_kinematics(self.joint_angles)
+        
+        # 到目标的距离 - 使用torch计算
+        ee_error_vec = self.target_pos - end_pos
+        target_dis = torch.norm(ee_error_vec)
+        
+        # 到障碍物的距离
+        dis_to_obs = self.get_dis_link_to_obstacle_from_positions(joint1_pos, end_pos)
 
-        # 计算关键距离信息
-        dist_to_target = torch.norm(end_pos - self.target_pos)
-        dist_end_to_obstacle = torch.norm(end_pos - self.obstacle_pos)
-        dist_joint1_to_obstacle = torch.norm(joint1_pos - self.obstacle_pos)
-        
-        # 计算连杆到障碍物的最短距离（更精确的碰撞风险）
-        min_dist_to_obstacle = self._compute_min_distance_to_obstacle(base_pos, joint1_pos, end_pos)
-        
         # 使用torch拼接
         state = torch.cat([
-            self.joint_angles,              # (2,)
-            self.joint_velocities,          # (2,)
-            end_pos,                        # (2,)
-            self.target_pos,                # (2,)
-            self.obstacle_pos,              # (2,)
-            dist_to_target.unsqueeze(0),    # (1,) **新增**
-            dist_end_to_obstacle.unsqueeze(0),      # (1,) **新增**
-            dist_joint1_to_obstacle.unsqueeze(0),   # (1,) **新增**
-            min_dist_to_obstacle.unsqueeze(0)       # (1,) **新增**
-        ]) # shape (14,)
+            self.joint_angles,
+            end_pos,
+            torch.tensor([target_dis, ee_error_vec[0], ee_error_vec[1]], device=self.device),
+            dis_to_obs  # dis_to_obs已经是1维张量，不需要unsqueeze
+        ])
         
         # 只在需要时转换为numpy
         if return_numpy:
             return state.cpu().numpy().astype(np.float32)
         return state
-    
-    def _compute_min_distance_to_obstacle(self, base_pos, joint1_pos, end_pos):
-        """计算连杆到障碍物的最短距离"""
-        # 检查两段连杆到障碍物的距离
-        segments = [(base_pos, joint1_pos), (joint1_pos, end_pos)]
-        min_dist = float('inf')
-        
-        for seg_start, seg_end in segments:
-            # 计算点到线段的最短距离
-            seg_vec = seg_end - seg_start
-            seg_len_sq = torch.sum(seg_vec ** 2)
-            
-            if seg_len_sq > 1e-8:  # 避免除零
-                t = torch.clamp(
-                    torch.sum((self.obstacle_pos - seg_start) * seg_vec) / seg_len_sq,
-                    0.0, 1.0
-                )
-                closest_point = seg_start + t * seg_vec
-                dist = torch.norm(self.obstacle_pos - closest_point)
-                min_dist = min(min_dist, dist.item())
-        
-        return torch.tensor(min_dist, dtype=torch.float32, device=self.device)
     
     def reset(self):
         """重置环境到初始状态"""
@@ -250,9 +229,6 @@ class Arm2DEnv:
         self.current_step = 0
         self.dist_to_target_prev = None
         self._cached_end_pos = None  # 清除缓存
-        # 清除里程碑标记（添加更多细粒度里程碑，特别关注接近阶段）
-        self._milestone_reached = {0.8: False, 0.6: False, 0.4: False, 0.3: False, 0.2: False, 0.15: False, 0.1: False}  # 距离里程碑
-        self.min_dist_to_target = float('inf')  # 重置最小距离
         
         # Gymnasium API: 返回 (state, info)
         return self.get_state(), {}
@@ -270,7 +246,7 @@ class Arm2DEnv:
         d = torch.sqrt(x**2 + y**2)
         
         # 如果目标不可达，使用可达范围内的近似值
-        d = torch.clamp(d, abs(l1 - l2) + 0.1, l1 + l2 - 0.1)
+        d = torch.clamp(d, abs(l1 - l2) + 0.1 * self.m_to_env_scale, l1 + l2 - 0.1 * self.m_to_env_scale)
         
         # 使用余弦定理计算theta2
         cos_theta2 = (d**2 - l1**2 - l2**2) / (2 * l1 * l2)
@@ -284,7 +260,7 @@ class Arm2DEnv:
         
         return torch.stack([theta1, theta2])
     
-    def step(self, action, return_reward_details=False):
+    def step(self, action, return_reward_details=True):
         """
         执行动作
         action: [torque1, torque2] 范围[-max_torque, max_torque]
@@ -297,7 +273,7 @@ class Arm2DEnv:
         
         # 简单的动力学模型：tau = I * alpha（忽略重力和摩擦）
         # 这里假设单位惯量
-        angular_acceleration = action
+        angular_acceleration = action # shape: (2,)
         
         # 更新角速度和角度
         self.joint_velocities += angular_acceleration * self.dt
@@ -316,7 +292,7 @@ class Arm2DEnv:
         if return_reward_details:
             reward, reached_target, collision, reward_details = self._calculate_reward(action, return_details=True)
         else:
-            reward, reached_target, collision = self._calculate_reward(action)
+            reward, reached_target, collision = self._calculate_reward(action, return_details=False)
             reward_details = None
         
         # 获取新状态（使用缓存的end_pos）
@@ -333,139 +309,74 @@ class Arm2DEnv:
             
         return next_state, reward, reached_target, collision, truncated, info
     
-    def _calculate_reward(self, action, return_details=False):
+    def _calculate_reward(self, action, return_details=True):
         """计算奖励函数 - 使用torch加速和缓存
         
         Args:
-            action: 动作向量
+            action: 动作向量，形状为(2,)
             return_details: 是否返回奖励详细信息字典
         
         Returns:
             如果return_details=False: (reward, reached_target, collision)
             如果return_details=True: (reward, reached_target, collision, reward_details)
         """
-        # 初始化奖励详情字典
-        reward_details = {
-            'distance_penalty': 0.0,
-            'action_penalty': 0.0,
-            'static_penalty': 0.0,
-            'step_penalty': 0.0,
-            'closer_reward': 0.0,
-            'target_reward': 0.0,
-            'collision_penalty': 0.0,
-            'early_termination_penalty': 0.0,
-            'total': 0.0
-        }
-
         # 计算并缓存end_pos
-        _, joint1_pos, end_pos = self.forward_kinematics(self.joint_angles)
-        self._cached_end_pos = end_pos
+        _, joint1_pos, end_pos = self.forward_kinematics(self.joint_angles) # shape: (2,)
+        # self._cached_end_pos = end_pos
         
-        # 到目标的距离
+        # 到目标的距离（环境单位）- 所有位置已经是环境单位，无需额外转换
         dist_to_target = torch.norm(end_pos - self.target_pos)
-        dist_to_target_val = dist_to_target.item()
+        dist_to_target_val = dist_to_target.item()  # 已经是环境单位
         
         if self.dist_to_target_prev is None:
             self.dist_to_target_prev = dist_to_target_val # 初始化上一距离
         
         # 检查碰撞（使用已缓存的end_pos）
-        col_dist = self.check_collision_fast(end_pos, joint1_pos) # 碰撞返回负值距离，未碰撞返回0
-        collision = torch.any(col_dist < 0).item()
+        collision = self.check_collision_fast(end_pos,joint1_pos)
         
-        # 检查是否到达目标（只检查距离，不限制速度）
-        reached_target = dist_to_target_val < self.target_threshold
+        # 检查是否到达目标
+        reached_target = dist_to_target_val <= self.target_threshold
         
-        # 高度优化的奖励函数 - 极大化成功激励
+        # 初始化奖励详情字典
+        reward_details = {
+            'distance_penalty': 0.0,
+            'closer_reward': 0.0,
+            'collision_penalty': 0.0,
+            'action_penalty': 0.0,
+            'total': 0.0
+        }
+        
+        # 计算奖励
         reward = 0.0
-        
-        if reached_target:
-            # 成功到达目标！给予超大奖励确保这是最优策略
-            time_bonus = (self.max_steps - self.current_step) * 5.0  # 提高时间奖励
-            reward = self.reward_target + time_bonus
-            reward_details['target_reward'] = self.reward_target
-            reward_details['time_bonus'] = time_bonus
+        # -w1 * e^2
+        # reward_details['distance_penalty'] = -self.penalty_distance * dist_to_target_val**2
+        # reward += reward_details['distance_penalty']
+        reward_details['distance_penalty'] =  -np.log(dist_to_target_val**2 + self.tau_e)
+        reward += reward_details['distance_penalty']
+
+        # -ln(e^2 + self.tau_e)
+        reward_details['closer_reward'] =  (self.dist_to_target_prev - dist_to_target_val) * self.closer_reward_rate
+        self.dist_to_target_prev = dist_to_target_val
+        reward += reward_details['closer_reward']
+
+        # -w2 * \sum \phi_i, \phi_i = max(0, 1- d_i /self.collision_punish_distance)
+        # d_1, d_2 = self.get_dis_link_to_obstacle_from_positions(joint1_pos, end_pos)
+        # phi_1 = max(0.0, 1.0 - d_1.item() / (self.obstacle_radius + self.collision_punish_distance))
+        # phi_2 = max(0.0, 1.0 - d_2.item() / (self.obstacle_radius + self.collision_punish_distance))
+        # sum_phi = phi_1 + phi_2
+        # reward_details['collision_penalty'] = -self.reward_collision * sum_phi
+        if collision:
+            reward_details['collision_penalty'] = -self.reward_collision
         else:
-            # 1. 碰撞惩罚 - 直接终止（加大惩罚）
-            if collision:
-                reward = self.reward_collision * 2.0  # -400，从-200加倍
-                reward_details['collision_penalty'] = reward
-                reward_details['total'] = reward
-                if return_details:
-                    return reward, reached_target, collision, reward_details
-                return reward, reached_target, collision
-            
-            # 2. 距离到障碍物（用于计算危险程度）
-            dist_to_obstacle = torch.norm(end_pos - self.obstacle_pos).item()
-            safety_margin = 0.25  # 安全距离
-            
-            # 3. 接近目标的主要奖励（始终给予，大幅增强）
-            if self.dist_to_target_prev is not None:
-                improvement = self.dist_to_target_prev - dist_to_target_val
-                if improvement > 0:  # 接近目标
-                    closer_reward = 200.0 * improvement  # 从100提升到200
-                    reward += closer_reward
-                    reward_details['closer_reward'] = closer_reward
-                else:  # 远离目标
-                    away_penalty = 400.0 * improvement  # 从200提升到400（负数）
-                    reward += away_penalty
-                    reward_details['away_penalty'] = away_penalty
-            
-            # 4. 里程碑奖励（大幅增强）
-            milestone_bonus = 0.0
-            for threshold, reached in self._milestone_reached.items():
-                if not reached and dist_to_target_val < threshold:
-                    milestone_bonus += 500.0 * (1.0 - threshold)  # 从200提升到500
-                    self._milestone_reached[threshold] = True
-            if milestone_bonus > 0:
-                reward += milestone_bonus
-                reward_details['milestone_bonus'] = milestone_bonus
-            
-            # 5. 接近目标时的指数奖励（大幅增强）
-            if dist_to_target_val < 0.5:
-                exponential_bonus = 2000.0 * (1.0 - np.exp(-5.0 * (0.5 - dist_to_target_val)))  # 从1000提升到2000
-                reward += exponential_bonus
-                reward_details['exponential_bonus'] = exponential_bonus
-                
-                # 非常接近时的额外奖励
-                if dist_to_target_val < 0.2:
-                    ultra_close_bonus = 3000.0 * (0.2 - dist_to_target_val) / 0.2  # 从1500提升到3000
-                    reward += ultra_close_bonus
-                    reward_details['ultra_close_bonus'] = ultra_close_bonus
-                    
-                # 极度接近时的超级奖励（增强精度激励）
-                if dist_to_target_val < 0.15:
-                    super_close_bonus = 3000.0 * (0.15 - dist_to_target_val) / 0.15
-                    reward += super_close_bonus
-                    reward_details['super_close_bonus'] = super_close_bonus
-                    
-                # 精准到达奖励（距离<0.10时巨额奖励）
-                if dist_to_target_val < 0.10:
-                    precision_bonus = 5000.0 * (0.10 - dist_to_target_val) / 0.10
-                    reward += precision_bonus
-                    reward_details['precision_bonus'] = precision_bonus
-            
-            # 6. 危险区域惩罚（但不阻止接近目标的奖励）
-            if dist_to_obstacle < safety_margin:
-                danger_ratio = (safety_margin - dist_to_obstacle) / safety_margin
-                danger_penalty = -150.0 * (danger_ratio ** 2)
-                reward += danger_penalty
-                reward_details['danger_penalty'] = danger_penalty
-            
-            # 7. 速度控制（接近目标时减速）
-            if dist_to_target_val < 0.3:
-                velocity_norm = self.joint_velocities.norm().item()
-                target_velocity = 0.1
-                velocity_penalty = -45.0 * abs(velocity_norm - target_velocity)
-                reward += velocity_penalty
-                reward_details['velocity_penalty'] = velocity_penalty
-                        
-            self.dist_to_target_prev = dist_to_target_val
-            
-            # 8. 基础距离塑形
-            distance_shaping = 20.0 / (1.0 + dist_to_target_val) - 10.0
-            reward += distance_shaping
-            reward_details['distance_shaping'] = distance_shaping
-        
+            reward_details['collision_penalty'] = 0.0
+        reward += reward_details['collision_penalty']
+
+        # -w3 * ||action||^2 (对动作的平方进行惩罚)
+        action_squared = torch.sum(action ** 2).item()
+        reward_details['action_penalty'] = -self.penalty_action * action_squared
+        reward += reward_details['action_penalty']
+
+        # 统计总惩罚
         reward_details['total'] = reward
         
         if return_details:
@@ -474,7 +385,7 @@ class Arm2DEnv:
     
     @property
     def state_dim(self):
-        return 14  # 增强状态维度：原10维 + 4个距离特征
+        return 9  # 状态维度：关节角度(2) + 末端位置(2) + error向量(3) + 连杆到障碍物距离(2)
     
     @property
     def action_dim(self):
@@ -700,7 +611,7 @@ def visualize_episode(env:Arm2DEnv, agent, device, save_path='arm_animation.mp4'
             done = True
     
     # 创建动画 - 使用更大的画布来容纳奖励详情
-    fig, (ax, ax_text) = plt.subplots(1, 2, figsize=(16, 8), 
+    fig, (ax, ax_text) = plt.subplots(1, 2, figsize=(16, 12), 
                                        gridspec_kw={'width_ratios': [2, 1]})
     
     def animate(frame):
@@ -710,9 +621,10 @@ def visualize_episode(env:Arm2DEnv, agent, device, save_path='arm_animation.mp4'
         # 计算当前帧的累积奖励
         cumulative_reward = sum(rewards[:frame+1]) if frame < len(rewards) else sum(rewards)
         
-        # 左侧：绘制机械臂场景
-        ax.set_xlim(-2.5, 2.5)
-        ax.set_ylim(-2.5, 2.5)
+        # 左侧：绘制机械臂场景（坐标范围需要根据环境单位调整）
+        scale = env.m_to_env_scale  # 获取单位缩放比例
+        ax.set_xlim(-2.5 * scale, 2.5 * scale)
+        ax.set_ylim(-2.5 * scale, 2.5 * scale)
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
         
@@ -752,8 +664,12 @@ def visualize_episode(env:Arm2DEnv, agent, device, save_path='arm_animation.mp4'
             ax.plot(past_trajectory[:, 0], past_trajectory[:, 1], 
                    'c-', alpha=0.5, linewidth=1)
         
+        # 计算当前末端到目标的距离
+        dist_to_target = np.linalg.norm(data['end'] - target_pos_np)
+        
         ax.set_title(f'2D Arm Obstacle Avoidance - Step {frame}/{len(trajectory)-1}\n'
                     f'Joint Angles: θ1={data["angles"][0]:.2f}, θ2={data["angles"][1]:.2f}\n'
+                    f'Distance to Target: {dist_to_target:.2f} cm\n'
                     f'Cumulative Reward: {cumulative_reward:.2f}\n'
                     f'End Reason: {end_reason}',
                     fontsize=12)
@@ -768,16 +684,12 @@ def visualize_episode(env:Arm2DEnv, agent, device, save_path='arm_animation.mp4'
             
             # 构建奖励详情文本
             reward_text = f"[Step {frame} Reward Details]\n\n"
-            reward_text += f"Distance Penalty: {details['distance_penalty']:+.4f}\n"
-            reward_text += f"Action Penalty: {details['action_penalty']:+.4f}\n"
-            reward_text += f"Step Penalty: {details['step_penalty']:+.4f}\n"
-            reward_text += f"Closer Reward: {details['closer_reward']:+.4f}\n"
-            reward_text += f"Collision Penalty: {details['collision_penalty']:+.4f}\n"
-            if details.get('early_termination_penalty', 0) != 0:
-                reward_text += f"Early Term Penalty: {details['early_termination_penalty']:+.4f}\n"
-            reward_text += f"Target Reward: {details['target_reward']:+.4f}\n"
+            reward_text += f"Distance Penalty: {details['distance_penalty']:+.8f}\n"
+            reward_text += f"Closer Reward: {details['closer_reward']:+.8f}\n"
+            reward_text += f"Collision Penalty: {details['collision_penalty']:+.8f}\n"
+            reward_text += f"Action Penalty: {details['action_penalty']:+.8f}\n"
             reward_text += f"{'─' * 30}\n"
-            reward_text += f"Total Reward: {details['total']:+.4f}\n"
+            reward_text += f"Total Reward: {details['total']:+.8f}\n"
             
             ax_text.text(0.1, 0.5, reward_text, 
                         fontsize=11, family='monospace',
@@ -844,7 +756,7 @@ def moving_average(a, window_size):
     """计算移动平均，边界处使用部分窗口平均
     """
     a = np.array(a)  # 先转换为 NumPy 数组
-    # a = np.clip(a, -200, 200)  # 将奖励裁剪到[-200, 200]范围
+    a = np.clip(a, -200, 200)  # 将奖励裁剪到[-200, 200]范围
     cumulative_sum = np.cumsum(np.insert(a, 0, 0)) 
     middle = (cumulative_sum[window_size:] - cumulative_sum[:-window_size]) / window_size
     r = np.arange(1, window_size-1, 2)
@@ -855,21 +767,12 @@ def moving_average(a, window_size):
 def train_on_policy_agent(env:Arm2DEnv, agent:PPOContinuous, num_episodes):
     """训练on-policy智能体（如PPO、A2C等）"""
     return_list = []
-    success_list = []  # 记录每个episode是否成功
     best_avg_return = -float('inf')
-    best_success_rate = 0.0
-    best_model_state = None  # 保存最佳模型状态
-    patience_counter = 0  # 早停计数器
-    max_patience = 5  # 最大容忍的性能下降次数
     
     for i in range(10):
         with tqdm(total=int(num_episodes/10), desc='Iteration %d' % i) as pbar:
             for i_episode in range(int(num_episodes/10)):
                 episode_return = 0
-                reached_target_flag = False  # 记录是否成功到达目标
-                collision_count = 0  # 调试：记录碰撞次数
-                step_count = 0  # 调试：记录步数
-                min_dist_to_target = float('inf')  # 调试：记录最小目标距离
                 transition_dict = {'states': [], 'actions': [], 'next_states': [], 'rewards': [], 'dones': []}
                 state, _ = env.reset()  # Gymnasium API
                 done = False
@@ -877,17 +780,6 @@ def train_on_policy_agent(env:Arm2DEnv, agent:PPOContinuous, num_episodes):
                     action = agent.take_action(state)
                     next_state, reward, reached_target, collision, truncated, _ = env.step(action)  # Gymnasium API
                     done = reached_target or (collision and env.if_done_when_collision) or truncated
-                    if reached_target:
-                        reached_target_flag = True  # 标记成功
-                    if collision:
-                        collision_count += 1
-                    step_count += 1
-                    
-                    # 记录最小目标距离
-                    _, joint1, end = env.forward_kinematics(env.joint_angles)
-                    current_dist = torch.norm(end - env.target_pos).item()
-                    min_dist_to_target = min(min_dist_to_target, current_dist)
-                    
                     transition_dict['states'].append(state)
                     transition_dict['actions'].append(action)
                     transition_dict['next_states'].append(next_state)
@@ -895,79 +787,22 @@ def train_on_policy_agent(env:Arm2DEnv, agent:PPOContinuous, num_episodes):
                     transition_dict['dones'].append(done)
                     state = next_state
                     episode_return += reward
-                    
-                    # 调试：打印第一个episode的详细信息
-                    if i == 0 and i_episode == 0 and step_count <= 5:
-                        dist_to_obs = torch.norm(end - env.obstacle_pos).item()
-                        print(f"\n步{step_count}: 奖励={reward:.2f}, 目标距离={current_dist:.3f}, 障碍距离={dist_to_obs:.3f}, 碰撞={collision}")
-                
                 return_list.append(episode_return)
-                success_list.append(1.0 if reached_target_flag else 0.0)  # 记录成功/失败
-                
-                # 调试：打印关键episode的总结
-                if i == 0 and i_episode == 0:
-                    print(f"\nEpisode 1总结: 总回报={episode_return:.2f}, 步数={step_count}, 碰撞次数={collision_count}, 最小目标距离={min_dist_to_target:.3f}, 成功={reached_target_flag}, 阈值={env.target_threshold}")
-                # 打印高回报episode的详情
-                if episode_return > 15000:
-                    print(f"\n高回报Episode: 回报={episode_return:.2f}, 最小目标距离={min_dist_to_target:.3f}, 成功={reached_target_flag}, 阈值={env.target_threshold}")
-                
                 agent.update(transition_dict)
                 
                 # 更新显示和检查是否达到好的性能
                 if (i_episode+1) % 10 == 0:
                     avg_return = np.mean(return_list[-10:])
-                    success_rate = np.mean(success_list[-10:]) * 100  # 近10轮成功率
-                    pbar.set_postfix({
-                        'episode': '%d' % (num_episodes/10 * i + i_episode+1), 
-                        'return': '%.3f' % avg_return,
-                        'success': '%.1f%%' % success_rate  # 显示成功率
-                    })
-                    
-                    # 如果成功率提高，记录并保存模型
-                    if success_rate > best_success_rate:
-                        best_success_rate = success_rate
-                        # 保存最佳模型状态
-                        best_model_state = {
-                            'actor': agent.actor.state_dict(),
-                            'critic': agent.critic.state_dict(),
-                            'success_rate': success_rate,
-                            'avg_return': avg_return
-                        }
-                        patience_counter = 0  # 重置早停计数器
-                        if success_rate >= 80:  # 80%以上成功率
-                            print(f"\n🎯 高成功率! 成功率: {success_rate:.1f}%, 平均奖励: {avg_return:.2f}")
-                            # 如果达到90%以上成功率，提前结束训练
-                            if success_rate >= 90:
-                                print(f"\n✅ 达到目标成功率90%！提前结束训练，保护最佳模型。")
-                                # 恢复最佳模型
-                                if best_model_state is not None:
-                                    agent.actor.load_state_dict(best_model_state['actor'])
-                                    agent.critic.load_state_dict(best_model_state['critic'])
-                                return return_list, success_list
-                    else:
-                        patience_counter += 1
-                        # 如果连续多次没有提升且成功率较高，提前停止
-                        if patience_counter >= max_patience and best_success_rate >= 70:
-                            print(f"\n⚠️  连续{max_patience}次未提升，当前最佳成功率: {best_success_rate:.1f}%，提前结束训练。")
-                            # 恢复最佳模型
-                            if best_model_state is not None:
-                                agent.actor.load_state_dict(best_model_state['actor'])
-                                agent.critic.load_state_dict(best_model_state['critic'])
-                            return return_list, success_list
+                    pbar.set_postfix({'episode': '%d' % (num_episodes/10 * i + i_episode+1), 'return': '%.3f' % avg_return})
                     
                     # 如果平均奖励为正且是历史最佳，记录
                     if avg_return > best_avg_return:
                         best_avg_return = avg_return
+                        if avg_return > 50:  # 达到较好性能
+                            print(f"\n达到目前最佳性能! 平均奖励: {avg_return:.2f}")
                 
                 pbar.update(1)
-    
-    # 训练结束后恢复最佳模型
-    if best_model_state is not None:
-        print(f"\n📦 恢复最佳模型（成功率: {best_model_state['success_rate']:.1f}%）")
-        agent.actor.load_state_dict(best_model_state['actor'])
-        agent.critic.load_state_dict(best_model_state['critic'])
-    
-    return return_list, success_list
+    return return_list
 
 def compute_advantage(gamma, lmbda, td_delta):
     """计算GAE优势函数"""
@@ -980,35 +815,35 @@ def compute_advantage(gamma, lmbda, td_delta):
     advantage_list.reverse()
     return torch.tensor(np.array(advantage_list), dtype=torch.float)
 
-# 超参数设置 - 优化稳定性和学习效率
-actor_lr = 2e-4  # Actor网络学习率（适度提高）
-critic_lr = 8e-4  # Critic网络学习率（适度提高）
-num_episodes = 1500  # 训练episode数量（平衡训练时间和效果）
-hidden_dim = 512  # 神经网络隐藏层维度
-gamma = 0.99  # 折扣因子（重视长期奖励）
+# 超参数设置
+m_to_env_scale = 100.0  # 米到环境单位（厘米）的转换比例
+actor_lr = 3e-4  # Actor网络学习率（降低从1e-3到3e-4）
+critic_lr = 1e-3  # Critic网络学习率（降低从5e-3到1e-3）
+num_episodes = 1000  # 训练episode数量（减少以加快迭代）
+hidden_dim = 512  # 神经网络隐藏层维度（从512降到256，减少过拟合）
+gamma = 0.98  # 折扣因子（从0.99降到0.98，更关注近期奖励）
 lmbda = 0.95  # GAE中的λ参数，平衡偏差和方差
-epochs = 10  # 每次收集经验后的训练轮数（充分学习）
-eps = 0.15  # PPO截断参数（适度放宽，加快学习速度）
+epochs = 5  # 每次收集经验后的训练轮数（降低到5加快训练）
+eps = 0.2  # PPO截断参数，控制策略更新幅度
 
 # 环境参数
-max_torque = 2.0  # 最大扭矩
+max_torque = 2.0 * m_to_env_scale  # 最大扭矩（恢复到2.0给予更多控制能力）
 dt = 0.05  # 时间步长
-max_steps = 250  # 最大步数
-target_threshold = 0.15  # 到达目标的距离阈值（平衡精度和成功率）
-collision_margin = 0.001  # 碰撞检测边界
-if_done_when_collision = True  # 碰撞即终止，强化避障意识
+max_steps = 500  # 最大步数（从1000大幅降低到300，避免累积过多负奖励）
+target_threshold = 0.5e-2 * m_to_env_scale  # 到达目标的距离阈值，单位为环境单位,相当于0.5cm
+tau_e = 1e-4  # 目标距离稳定阈值
+collision_margin = 1e-3 * m_to_env_scale  # 碰撞检测边界
+if_done_when_collision = False  # 碰撞时终止episode
 
-# 奖励权重 - 避障优先设计
-reward_target = 5000.0  # 到达目标的奖励（大幅提高，确保是最优策略）
-reward_collision = -200.0  # 碰撞惩罚（大幅提高到-200）
-closer_reward_rate = 50.0  # 接近目标的奖励系数（降低，避免过度激进）
-penalty_distance = 0.0  # 不需要
-penalty_action = 0.0  # 不需要
-penalty_step = 0.0  # 不需要
-penalty_static = 0.0  # 不需要
-static_threshold = 0.02  # 判定为静止的速度阈值
-penalty_early_termination = 0.0  # 不需要
-min_steps_threshold = 0  # 不需要
+# 奖励权重 - 重新设计使奖励更平衡
+w1 = 1e-4  # 距离惩罚系数（从-1.0降到-0.1）
+w2 = 1000.0  # 碰撞惩罚
+penalty_action = 0.1  # 动作惩罚系数
+
+reward_target = 100.0  # 到达目标的奖励（从1000降到100）
+closer_reward_rate = 30.0  # 接近目标的奖励系数
+penalty_static = -0.5  # 静止不动的惩罚系数
+static_threshold = 0.01 * m_to_env_scale  # 判定为静止的速度阈值（原始单位为m/s，转换为cm/s）
 
 def train_arm():
     """训练2D机械臂"""
@@ -1021,7 +856,22 @@ def train_arm():
     
     # 创建环境（传递device以使用torch加速）
     env = Arm2DEnv(device=device)
-    # 环境参数已在__init__中正确设置，无需再次覆盖
+    env.m_to_env_scale = m_to_env_scale
+    env.max_torque = max_torque
+    env.dt = dt
+    env.max_steps = max_steps
+    env.target_threshold = target_threshold
+    env.tau_e = tau_e
+    env.collision_margin = collision_margin
+    env.collision_punish_distance = 2 * collision_margin
+    env.if_done_when_collision = if_done_when_collision
+    env.reward_target = reward_target
+    env.reward_collision = w2
+    env.penalty_distance = w1
+    env.penalty_action = penalty_action
+    env.closer_reward_rate = closer_reward_rate
+    env.penalty_static = penalty_static
+    env.static_threshold = static_threshold
 
     print(f"\n环境信息:")
     print(f"  状态维度: {env.state_dim}")
@@ -1052,7 +902,7 @@ def train_arm():
     start_time = os.times()
     
     # 训练
-    return_list, success_list = train_on_policy_agent(env, agent, num_episodes)
+    return_list = train_on_policy_agent(env, agent, num_episodes)
     
     # 训练结果分析
     print("\n" + "=" * 60)
@@ -1063,25 +913,16 @@ def train_arm():
     print(f"平均回报: {np.mean(return_list):.2f}")
     print(f"最后100个episode平均回报: {np.mean(return_list[-100:]):.2f}")
     print(f"最高回报: {np.max(return_list):.2f}")
-    print(f"总体成功率: {np.mean(success_list) * 100:.2f}%")
-    print(f"最后100个episode成功率: {np.mean(success_list[-100:]) * 100:.2f}%")
     print(f"性能改善: {np.mean(return_list[-100:]) - np.mean(return_list[:100]):.2f}")
     
     # 绘制训练结果
-    plot_path = '动手学强化学习/Hands-on-RL/2D_arm/figures/arm_training_results.png'
+    plot_path = '动手学强化学习/Hands-on-RL/2D_arm_paper/figures/arm_training_results.png'
     if not os.path.exists(os.path.dirname(plot_path)):
         os.makedirs(os.path.dirname(plot_path))
     plot_training_results(return_list, plot_path)
     
-    # 可视化训练后的表现
-    print("\n生成演示动画...")
-    mp4_path = '动手学强化学习/Hands-on-RL/2D_arm/figures/arm_training_animation.mp4'
-    if not os.path.exists(os.path.dirname(mp4_path)):
-        os.makedirs(os.path.dirname(mp4_path))
-    visualize_episode(env, agent, device, mp4_path)
-    
     # 保存模型
-    model_dir = '动手学强化学习/Hands-on-RL/2D_arm/model/arm2d_ppo_model.pth'
+    model_dir = '动手学强化学习/Hands-on-RL/2D_arm_paper/model/arm2d_ppo_model.pth'
     if not os.path.exists(os.path.dirname(model_dir)):
         os.makedirs(os.path.dirname(model_dir))
     torch.save({
@@ -1089,19 +930,38 @@ def train_arm():
         'critic_state_dict': agent.critic.state_dict(),
     }, model_dir)
     print(f"模型已保存到 {model_dir}")
+
+    # 可视化训练后的表现
+    print("\n生成演示动画...")
+    mp4_path = '动手学强化学习/Hands-on-RL/2D_arm_paper/figures/arm_training_animation.mp4'
+    if not os.path.exists(os.path.dirname(mp4_path)):
+        os.makedirs(os.path.dirname(mp4_path))
+    visualize_episode(env, agent, device, mp4_path)
     
     return agent, env, return_list
 
 
-def test_arm(model_path='动手学强化学习/Hands-on-RL/2D_arm/model/arm2d_ppo_model.pth'):
+def test_arm(model_path='动手学强化学习/Hands-on-RL/2D_arm_paper/model/arm2d_ppo_model.pth'):
     """测试已训练的模型"""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # 创建环境和智能体（传递device以使用torch加速）
     env = Arm2DEnv(device=device)
+    env.m_to_env_scale = m_to_env_scale
     env.max_torque = max_torque
     env.dt = dt
-    # 环境参数已在__init__中正确设置，无需再次覆盖
+    env.max_steps = max_steps
+    env.target_threshold = target_threshold
+    env.collision_margin = collision_margin
+    env.collision_punish_distance = 2 * collision_margin
+    env.if_done_when_collision = if_done_when_collision
+    env.reward_target = reward_target
+    env.reward_collision = w2
+    env.penalty_distance = w1
+    env.penalty_action = penalty_action
+    env.closer_reward_rate = closer_reward_rate
+    env.penalty_static = penalty_static
+    env.static_threshold = static_threshold
     agent = PPOContinuous(
         state_dim=env.state_dim,
         hidden_dim=hidden_dim,
@@ -1122,7 +982,7 @@ def test_arm(model_path='动手学强化学习/Hands-on-RL/2D_arm/model/arm2d_pp
     print(f"模型已从 {model_path} 加载")
     
     # 可视化
-    mp4_path = '动手学强化学习/Hands-on-RL/2D_arm/figures/arm_testing_animation.mp4'
+    mp4_path = '动手学强化学习/Hands-on-RL/2D_arm_paper/figures/arm_testing_animation.mp4'
     if not os.path.exists(os.path.dirname(mp4_path)):
         os.makedirs(os.path.dirname(mp4_path))
     visualize_episode(env, agent, device, mp4_path)
@@ -1137,7 +997,7 @@ def main():
         end_time =  os.times()
         print(f"\n总训练时间: {end_time.elapsed - start_time.elapsed:.2f} 秒")
     else:
-        test_arm('动手学强化学习/Hands-on-RL/2D_arm/model/arm2d_ppo_model.pth')
+        test_arm('动手学强化学习/Hands-on-RL/2D_arm_paper/model/arm2d_ppo_model.pth')
 
 if __name__ == "__main__":
     main()
