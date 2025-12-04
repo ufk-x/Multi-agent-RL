@@ -51,7 +51,8 @@ class ArmEnv:
     def _get_state(self):
         x, y = self._fk(self.angles)
         # 归一化状态通常有助于训练，这里简单处理
-        return np.concatenate([self.angles, OBSTACLE_POS, [x, y], GOAL_POS]) 
+        # return np.concatenate([self.angles, OBSTACLE_POS, [x, y], GOAL_POS]) 
+        return np.concatenate([self.angles, [x, y],  OBSTACLE_POS, GOAL_POS]) 
 
     def _fk(self, angles):
         theta1, theta2 = angles
@@ -119,8 +120,8 @@ class ArmEnv:
         info = {}
         
         # 1. 到达目标
-        if dist_to_goal < 0.1:
-            reward += 200
+        if dist_to_goal < 0.07:
+            reward += 20000
             done = True
             info['result'] = 'success'
         # 2. 碰撞
@@ -147,13 +148,15 @@ class PolicyNet(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=128):
         super(PolicyNet, self).__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
         self.fc_mu = nn.Linear(hidden_dim, action_dim)
         self.fc_std = nn.Linear(hidden_dim, action_dim)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = F.relu(self.ln2(self.fc2(x)))
         mu = 2.0 * torch.tanh(self.fc_mu(x)) # 输出范围 -2 到 2 (再由环境缩放)
         std = F.softplus(self.fc_std(x)) + 1e-5
         return mu, std
@@ -162,12 +165,14 @@ class ValueNet(nn.Module):
     def __init__(self, state_dim, hidden_dim=128):
         super(ValueNet, self).__init__()
         self.fc1 = nn.Linear(state_dim, hidden_dim)
+        self.ln1 = nn.LayerNorm(hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.ln2 = nn.LayerNorm(hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, 1)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
+        x = F.relu(self.ln1(self.fc1(x)))
+        x = F.relu(self.ln2(self.fc2(x)))
         return self.fc3(x)
 
 class PPO:
@@ -245,7 +250,7 @@ def train():
     env = ArmEnv()
     ppo = PPO(env.state_dim, env.action_dim)
     
-    MAX_EPISODES = 2000
+    MAX_EPISODES = 1000
     UPDATE_TIMESTEP = 2000
     
     memory = {'states': [], 'actions': [], 'log_probs': [], 'rewards': [], 'dones': []}
