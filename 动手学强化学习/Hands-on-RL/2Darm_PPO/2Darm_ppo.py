@@ -39,20 +39,22 @@ ACTION_SCALE = 1.0 # 动作缩放（最大角速度）
 
 class ArmEnv:
     def __init__(self):
-        self.state_dim = 8 # theta1, theta2, x_obs, y_obs, x_ee, y_ee, x_target, y_target
+        self.state_dim = 8 # vel1, vel2, theta1, theta2, x_ee, y_ee, x_obs, y_obs, rel_x, rel_y
         self.action_dim = 2 # d_theta1, d_theta2
         self.reset()
 
     def reset(self):
         self.angles = START_ANGLES.copy()
+        self.vel = np.array([0.0, 0.0])
         self.steps = 0
         return self._get_state()
 
     def _get_state(self):
         x, y = self._fk(self.angles)
         # 归一化状态通常有助于训练，这里简单处理
-        # return np.concatenate([self.angles, OBSTACLE_POS, [x, y], GOAL_POS]) 
-        return np.concatenate([self.angles, [x, y],  OBSTACLE_POS, GOAL_POS]) 
+        return np.concatenate([self.angles, [x, y], OBSTACLE_POS,  GOAL_POS]) 
+        # return np.concatenate([self.vel, self.angles, [x, y],  OBSTACLE_POS, GOAL_POS-[x, y]]) 
+        # return np.concatenate([self.vel, self.angles, OBSTACLE_POS, [x, y], GOAL_POS-[x, y]]) 
 
     def _fk(self, angles):
         theta1, theta2 = angles
@@ -90,9 +92,14 @@ class ArmEnv:
 
     def step(self, action):
         self.steps += 1
-        # Action 是角速度/增量
+        # 限幅
         action = np.clip(action, -1, 1) * ACTION_SCALE
+        # Action 是角速度/增量
         self.angles += action * DT
+
+        # Action 是角加速度
+        # self.vel += action * DT
+        # self.angles += self.vel * DT
         
         # 限制角度范围 (-pi, pi)
         self.angles = np.arctan2(np.sin(self.angles), np.cos(self.angles))
@@ -320,7 +327,7 @@ def visualize(ppo, save_name='arm_trajectory.mp4'):
     reward = 0  # 初始化当前奖励
     
     print("Generating visualization...")
-    while not done:
+    while True:
         # 记录帧
         ax.clear()
         ax.set_xlim(-2.5, 2.5)
@@ -367,6 +374,21 @@ def visualize(ppo, save_name='arm_trajectory.mp4'):
                 fontsize=10, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
         
+        # 如果episode结束，显示结束原因
+        if done:
+            result = info.get('result', 'unknown')
+            result_colors = {
+                'success': 'green',
+                'collision': 'red',
+                'timeout': 'orange'
+            }
+            result_text = f'Episode Ended: {result.upper()}'
+            ax.text(0.5, 0.5, result_text, transform=ax.transAxes,
+                    fontsize=16, fontweight='bold', ha='center', va='center',
+                    bbox=dict(boxstyle='round', facecolor=result_colors.get(result, 'gray'), 
+                             alpha=0.9, edgecolor='black', linewidth=2),
+                    color='white')
+        
         ax.set_title("2D Arm PPO - Obstacle Avoidance")
         ax.legend(loc='upper right', fontsize=8)
         
@@ -383,6 +405,13 @@ def visualize(ppo, save_name='arm_trajectory.mp4'):
             
         image = image.reshape(fig.canvas.get_width_height()[::-1] + (3,))
         frames.append(image)
+        
+        # 如果已经结束，多添加几帧显示结束画面，然后退出
+        if done:
+            # 重复最后一帧30次（1秒）让结束信息更清晰
+            for _ in range(30):
+                frames.append(image)
+            break
         
         # 动作
         action, _ = ppo.select_action(state)
